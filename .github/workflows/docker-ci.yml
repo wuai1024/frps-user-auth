@@ -1,0 +1,140 @@
+name: docker-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag'
+        required: false
+
+env:
+  TZ: Asia/Shanghai
+  artifact_name: wuai1024-homework
+  APP_NAME: frps-user-auth
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Build Dockerfile
+        run: |
+          cat > Dockerfile << EOF
+          # 第一阶段：使用Maven构建Java应用程序
+          FROM maven:3.9.7-eclipse-temurin-17 AS builder
+          WORKDIR /app
+          COPY . .
+          RUN mvn -B clean package -Dmaven.test.skip=true
+          
+          # 第二阶段：使用OpenJDK构建最终镜像
+          FROM alpine:latest
+          WORKDIR /app
+          
+          RUN apk update && \
+            apk --no-cache add tzdata openjdk17 && \
+            rm -rf /var/cache/apk/* && \
+            mkdir ./logs
+          
+          # 设置时区为 "Asia/Shanghai"，这里根据你的需求设置时区
+          ENV TZ=Asia/Shanghai
+          # 设置 JAVA_HOME 环境变量
+          ENV JAVA_HOME /usr/lib/jvm/default-jvm
+          
+          COPY --from=builder /app/target/*.jar ./app.jar
+          CMD ["sh","-c","java \${JAVA_OPTS} -Duser.timezone=Asia/Shanghai -Dfile.encoding=utf-8 -Djava.security.egd=file:/dev/./urandom -jar app.jar \${PARAMS}"]
+          EOF
+
+      - name: Upload Build Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+          path: |
+            *
+
+  docker-build-acr:
+    needs: docker-build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download Build Files
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+
+      - name: Get Image Tag Name
+        run: |
+          echo "TAG_NAME=${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.sha }}" >> $GITHUB_ENV
+          echo "TAG_DAY=$(date '+%Y.%-m.%-d')" >> $GITHUB_ENV
+          echo "TAG_MONTH=$(date '+%Y.%-m')" >> $GITHUB_ENV
+
+      - name: Login to the ACR
+        uses: aliyun/acr-login@v1
+        with:
+          region-id: ${{ secrets.ACR_REGION_ID }}
+          login-server: registry.${{ secrets.ACR_REGION_ID }}.aliyuncs.com
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and Push to ACR
+        run: |
+          docker build \
+          -t registry.${{ secrets.ACR_REGION_ID }}.aliyuncs.com/${{ secrets.ACR_NAMESAPCE }}/${{ env.APP_NAME }}:${{ env.TAG_NAME }} \
+          -t registry.${{ secrets.ACR_REGION_ID }}.aliyuncs.com/${{ secrets.ACR_NAMESAPCE }}/${{ env.APP_NAME }}:${{ env.TAG_DAY }} \
+          -t registry.${{ secrets.ACR_REGION_ID }}.aliyuncs.com/${{ secrets.ACR_NAMESAPCE }}/${{ env.APP_NAME }}:${{ env.TAG_MONTH }} \
+          -t registry.${{ secrets.ACR_REGION_ID }}.aliyuncs.com/${{ secrets.ACR_NAMESAPCE }}/${{ env.APP_NAME }}:latest \
+          --push \
+          .
+
+  docker-build-hub:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Build Files
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+
+      - name: Get Image Tag Name
+        run: |
+          echo "TAG_NAME=${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.sha }}" >> $GITHUB_ENV
+          echo "TAG_DAY=$(date '+%Y.%-m.%-d')" >> $GITHUB_ENV
+          echo "TAG_MONTH=$(date '+%Y.%-m')" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Login to the GPR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GPR_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/ppc64le,linux/s390x
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ env.TAG_NAME }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ env.TAG_DAY }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ env.TAG_MONTH }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:latest
+            ghcr.io/${{ github.repository_owner }}/${{ env.APP_NAME }}:${{ env.TAG_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.APP_NAME }}:${{ env.TAG_DAY }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.APP_NAME }}:${{ env.TAG_MONTH }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.APP_NAME }}:latest

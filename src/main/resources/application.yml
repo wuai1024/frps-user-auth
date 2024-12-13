@@ -1,0 +1,9 @@
+server:
+  port: 9000
+  undertow:
+    buffer-size: 1024
+    direct-buffers: true
+
+spring:
+  application:
+    name: frps-user-auth
